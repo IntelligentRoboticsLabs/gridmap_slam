@@ -1,0 +1,6 @@
+gridmap_slam:
+  ros__parameters:
+    use_sim_time: true
+    resolution: 0.5
+    map_frame: map
+    cleaning_time: 2.0
