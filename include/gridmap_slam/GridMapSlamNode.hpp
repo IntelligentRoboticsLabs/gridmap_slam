@@ -28,6 +28,7 @@
 #include "grid_map_msgs/msg/grid_map.hpp"
 #include "octomap_msgs/msg/octomap.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
+#include "std_srvs/srv/empty.hpp"
 
 #include "interactive_markers/interactive_marker_server.hpp"
 
@@ -54,10 +55,14 @@ private:
   void publish_map(const pcl::PointCloud<pcl::PointXYZ> & pc_map);
   void publish_octomap(const octomap::OcTree & octomap);
   void marker_feedback(visualization_msgs::msg::InteractiveMarkerFeedback::ConstSharedPtr feedback);
-
+  void save_map_callback(const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+    std::shared_ptr<std_srvs::srv::Empty::Response> response);
+      
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pc_pub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_pc_sub_;
   rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr octomap_pub_;
+  
+  rclcpp::Service<std_srvs::srv::Empty>::SharedPtr save_srv_;
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr map_pc_;
   std::shared_ptr<interactive_markers::InteractiveMarkerServer> im_server_;

@@ -27,6 +27,7 @@ find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(interactive_markers REQUIRED)
+find_package(std_srvs REQUIRED)
 
 set(dependencies
   rclcpp
@@ -46,6 +47,7 @@ set(dependencies
   pcl_ros
   visualization_msgs
   interactive_markers
+  std_srvs
 )
 
 include_directories(include)

@@ -13,6 +13,8 @@
 // limitations under the License.
 
 
+#include <random>
+
 #include "gridmap_slam/GridMapSlamNode.hpp"
 
 #include "tf2/LinearMath/Transform.h"
@@ -26,6 +28,7 @@
 #include "tf2_ros/buffer.h"
 #include "pcl/io/pcd_io.h"
 #include "pcl/point_types.h"
+#include "pcl/kdtree/kdtree_flann.h"
 
 #include "pcl_ros/transforms.hpp"
 #include "grid_map_ros/grid_map_ros.hpp"
@@ -45,13 +48,17 @@ namespace gridmap_slam
 {
 
 using std::placeholders::_1;
+using std::placeholders::_2;
 using namespace std::chrono_literals;
 
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr read_pcd(const std::string & pcd_file, double resolution);
+pcl::PointCloud<pcl::PointXYZ>::Ptr read_pcd(const std::string & pcd_file);
 std::unique_ptr<octomap::OcTree> generate_octomap(
   const pcl::PointCloud<pcl::PointXYZ> & pc_map, double resolution);
 visualization_msgs::msg::InteractiveMarker create_marker(double size);
+void remove_points(
+  pcl::PointCloud<pcl::PointXYZ> & map, geometry_msgs::msg::Point position, double resolution);
+pcl::PointCloud<pcl::PointXYZ>::Ptr reduce_density(pcl::PointCloud<pcl::PointXYZ>::Ptr map, double factor);
 
 GridMapSlamNode::GridMapSlamNode(
   const std::string & node_name,
@@ -67,7 +74,11 @@ GridMapSlamNode::GridMapSlamNode(
   octomap_pub_ = create_publisher<octomap_msgs::msg::Octomap>("octomap", 10);
   map_pc_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("map", 10);
 
-  map_pc_ = read_pcd(pcd_file, resolution_);
+  save_srv_ = create_service<std_srvs::srv::Empty>(
+    "save_map", std::bind(&GridMapSlamNode::save_map_callback, this, _1, _2));
+
+  map_pc_ = read_pcd(pcd_file);
+  map_pc_ = reduce_density(map_pc_, 0.2);
   publish_map(*map_pc_);
 
   publish_octomap(*generate_octomap(*map_pc_, resolution_));
@@ -125,29 +136,43 @@ GridMapSlamNode::marker_feedback(visualization_msgs::msg::InteractiveMarkerFeedb
     get_logger(), feedback->marker_name << " is now at "
       << feedback->pose.position.x << ", " << feedback->pose.position.y
       << ", " << feedback->pose.position.z );
-
+  
 
   if (feedback->event_type == visualization_msgs::msg::InteractiveMarkerFeedback::MOUSE_DOWN &&
-    feedback->control_name == "click") {
-    RCLCPP_INFO_STREAM(get_logger(), "Click");
+    feedback->control_name == "click")
+  {  
+    remove_points(*map_pc_, feedback->pose.position, resolution_);
+
+    publish_map(*map_pc_);
+    publish_octomap(*generate_octomap(*map_pc_, resolution_));
   }
 }
 
-pcl::PointCloud<pcl::PointXYZ>::Ptr
-read_pcd(const std::string & pcd_file, double resolution)
+void
+GridMapSlamNode::save_map_callback(const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+  std::shared_ptr<std_srvs::srv::Empty::Response> response)
+{
+  auto now = std::chrono::system_clock::now();
+  std::time_t time_now = std::chrono::system_clock::to_time_t(now);
+    
+  std::stringstream ss;
+  ss << std::put_time(std::localtime(&time_now), "%Y-%m-%d_%H-%M-%S");
+
+  // Construct the filename with the current date and time
+  std::string filename = "map_" + ss.str() + ".pcd";
+
+  // Save the point cloud to a .pcd file
+  pcl::io::savePCDFileASCII(filename, *map_pc_);
+}
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr read_pcd(const std::string & pcd_file)
 {
   auto cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
   if (pcl::io::loadPCDFile<pcl::PointXYZ>(pcd_file, *cloud) == -1) {
     PCL_ERROR("Couldn't read file your_file.pcd \n");
     return nullptr;
   } else {
-    auto ret = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-    pcl::VoxelGrid<pcl::PointXYZ> voxel_grid_filter;
-    voxel_grid_filter.setInputCloud(cloud);
-    voxel_grid_filter.setLeafSize(resolution, resolution, resolution);
-    voxel_grid_filter.filter(*ret);
-    
-    return ret;
+    return cloud;
   }
 }
 
@@ -226,7 +251,58 @@ visualization_msgs::msg::InteractiveMarker create_marker(double size)
   return int_marker;
 }
 
+void remove_points(
+  pcl::PointCloud<pcl::PointXYZ> & map, geometry_msgs::msg::Point position, double resolution)
+{
+  int counter = 0;
+  pcl::PointCloud<pcl::PointXYZ>::iterator it = map.begin();
+  while (it != map.end()) {
+    pcl::PointXYZ point = *it;
+    double dist_x = fabs(point.x - position.x);
+    double dist_y = fabs(point.y - position.y);
+    double dist_z = fabs(point.z - position.z);
 
+    if (dist_x < resolution && dist_y < resolution && dist_z < resolution) {
+      it = map.points.erase(it);
+      counter++;
+    } else {
+      ++it;
+    }
+  }
+
+  map.resize(map.points.size());
+  std::cout << "Removed " << counter << " points" << std::endl;
+}
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr
+reduce_density(pcl::PointCloud<pcl::PointXYZ>::Ptr map, double factor)
+{
+  std::random_device rd;
+  std::mt19937 gen(rd());
+
+  size_t new_size = map->size() * factor;
+
+  std::cout << "reducing density " << map->size() << " -> " << new_size << std::endl;
+  
+  pcl::PointCloud<pcl::PointXYZ>::Ptr modified_cloud(new pcl::PointCloud<pcl::PointXYZ>);   
+  std::uniform_int_distribution<> dis(0, map->size());
+  std::vector<size_t> keep(new_size);
+  for (size_t i = 0; i < new_size; i++) {
+    keep[i] = dis(gen);
+  }
+
+  int counter = map->size();
+  for (size_t i = 0; i < new_size; i++) {
+    std::cout << "\r" << counter-- << std::flush;
+    modified_cloud->push_back(map->points[keep[i]]);
+  }
+
+  modified_cloud->resize(modified_cloud->points.size());
+
+  return modified_cloud;
+}
+
+   
 /*
 pcl::PointCloud<pcl::PointXYZ>::Ptr
 get_reduced_pc(const sensor_msgs::msg::PointCloud2 & pc, double resolution)

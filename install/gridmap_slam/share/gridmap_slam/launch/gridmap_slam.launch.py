@@ -1,0 +1,1 @@
+/home/fmrico/ros/ros2/summit_ws/src/gridmap_slam/launch/gridmap_slam.launch.py
