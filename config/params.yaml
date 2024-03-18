@@ -1,6 +1,7 @@
 gridmap_slam:
   ros__parameters:
+    use_sim_time: false
     resolution: 0.5
-    path_time: 3.0
+    density: 1.0
     map_frame: map
-    robot_floor_frame: base_footprint
+    robot_floor_frame: robot_base_footprint

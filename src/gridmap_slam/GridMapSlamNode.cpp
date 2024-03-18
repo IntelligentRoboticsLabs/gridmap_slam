@@ -29,6 +29,7 @@
 #include "pcl/io/pcd_io.h"
 #include "pcl/point_types.h"
 #include "pcl/kdtree/kdtree_flann.h"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
 #include "pcl_ros/transforms.hpp"
 #include "grid_map_ros/grid_map_ros.hpp"
@@ -64,24 +65,42 @@ GridMapSlamNode::GridMapSlamNode(
   const std::string & node_name,
   const std::string & pcd_file,
   const rclcpp::NodeOptions & options)
-: Node(node_name, options)
+: Node(node_name, options),
+  tf_buffer_(this->get_clock()),
+  tf_listener_(tf_buffer_)
 {
+  double density = 1.0;
   declare_parameter("resolution", resolution_);
+  declare_parameter("density", density);
+  declare_parameter("map_frame", map_frame_);
+  declare_parameter("robot_floor_frame", robot_floor_frame_);
   get_parameter("resolution", resolution_);
+  get_parameter("density", density);
+  get_parameter("map_frame", map_frame_);
+  get_parameter("robot_floor_frame", robot_floor_frame_);
 
   map_pc_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-    "map", 10, std::bind(&GridMapSlamNode::map_pc_callback, this, _1));
-  octomap_pub_ = create_publisher<octomap_msgs::msg::Octomap>("octomap", 10);
-  map_pc_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("map", 10);
+    "final_map", 10, std::bind(&GridMapSlamNode::map_pc_callback, this, _1));
+  path_sub_ = create_subscription<nav_msgs::msg::Path>(
+    "path", 10, std::bind(&GridMapSlamNode::path_callback, this, _1));
+  octomap_pub_ = create_publisher<octomap_msgs::msg::Octomap>(
+    "octomap", rclcpp::QoS(10).transient_local());
+  map_pc_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+    "final_map", rclcpp::QoS(10).transient_local());
+  gridmap_pub_ = create_publisher<grid_map_msgs::msg::GridMap>(
+    "grid_map", rclcpp::QoS(10).transient_local());
 
   save_srv_ = create_service<std_srvs::srv::Empty>(
     "save_map", std::bind(&GridMapSlamNode::save_map_callback, this, _1, _2));
+  save_srv_ = create_service<std_srvs::srv::Empty>(
+    "update_gridmap", std::bind(&GridMapSlamNode::update_gridmap_callback, this, _1, _2));
 
   map_pc_ = read_pcd(pcd_file);
-  map_pc_ = reduce_density(map_pc_, 0.2);
+  map_pc_ = reduce_density(map_pc_, density);
   publish_map(*map_pc_);
 
-  publish_octomap(*generate_octomap(*map_pc_, resolution_));
+  octree_ = generate_octomap(*map_pc_, resolution_);
+  publish_octomap(*octree_);
 
   im_server_ = std::make_shared<interactive_markers::InteractiveMarkerServer>("simple_marker", this);
   auto marker = create_marker(resolution_);
@@ -89,6 +108,13 @@ GridMapSlamNode::GridMapSlamNode(
 
   im_server_->insert(marker, std::bind(&GridMapSlamNode::marker_feedback, this, _1));
   im_server_->applyChanges();
+
+  update_gridmap();
+  publish_gridmap(*gridmap_);
+
+  // publish_timer_ = create_wall_timer(
+  //   3s, std::bind(&GridMapSlamNode::publish_cycle, this));
+
 
   // gridmap_pub_ = create_publisher<grid_map_msgs::msg::GridMap>("grid_map", 10);
   // octomap_pub_ = create_publisher<octomap_msgs::msg::Octomap>("octomap", 10);
@@ -101,10 +127,26 @@ GridMapSlamNode::GridMapSlamNode(
 }
 
 void
+GridMapSlamNode::publish_cycle()
+{
+  publish_map(*map_pc_);
+  publish_octomap(*octree_);
+
+
+  publish_gridmap(*gridmap_);
+}
+
+void
 GridMapSlamNode::map_pc_callback(sensor_msgs::msg::PointCloud2::UniquePtr pc_in)
 {
   pcl::PointCloud<pcl::PointXYZ>::Ptr map_pc_(new pcl::PointCloud<pcl::PointXYZ>);
   pcl::fromROSMsg(*pc_in, *map_pc_);
+}
+
+void
+GridMapSlamNode::path_callback(nav_msgs::msg::Path::UniquePtr path_in)
+{
+  path_ = std::move(path_in);
 }
 
 void
@@ -174,6 +216,103 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr read_pcd(const std::string & pcd_file)
   } else {
     return cloud;
   }
+}
+
+
+
+void
+GridMapSlamNode::update_gridmap_callback(const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+  std::shared_ptr<std_srvs::srv::Empty::Response> response)
+{
+  update_gridmap();
+  publish_gridmap(*gridmap_);
+}
+
+void
+GridMapSlamNode::update_gridmap()
+{
+  pcl::PointXYZ min_point, max_point;
+  pcl::getMinMax3D(*map_pc_, min_point, max_point);
+
+  double size_x = max_point.x - min_point.x;
+  double size_y = max_point.y - min_point.y;
+
+  gridmap_ = std::make_unique<grid_map::GridMap>();
+  gridmap_->setFrameId("map");
+  gridmap_->setGeometry(grid_map::Length(size_x, size_y), resolution_, grid_map::Position(0.0, 0.0));
+
+  gridmap_->add("elevation");
+  gridmap_->add("occupancy");
+
+  RCLCPP_INFO(get_logger(), "Init Gridmap");
+  Eigen::MatrixXf em(gridmap_->getSize()(0), gridmap_->getSize()(1));
+  Eigen::MatrixXf om(gridmap_->getSize()(0), gridmap_->getSize()(1));
+  for (auto i = 0; i < gridmap_->getSize()(0); i++) {
+    for (auto j = 0; j < gridmap_->getSize()(1); j++) {
+      em(i, j) = NAN;
+      om(i, j) = NAN;
+    }
+  }
+
+  RCLCPP_INFO(get_logger(), "Adding points from pointcloud");
+  for (const auto & point : map_pc_->points) {
+    grid_map::Position position(point.x, point.y);
+    grid_map::Index idx;
+    gridmap_->getIndex(position, idx);
+
+    float height = em(idx(0), idx(1));
+    if (std::isnan(height) ||  height > point.z) {
+      em(idx(0), idx(1)) = point.z;
+    }
+  }
+
+  RCLCPP_INFO(get_logger(), "Set obstacles");
+  for (auto i = 1; i < gridmap_->getSize()(0) - 1; i++) {
+    for (auto j = 1; j < gridmap_->getSize()(1) - 1; j++) {
+      auto diff_up = em(i, j) - em(i, j - 1);
+      auto diff_down = em(i, j) - em(i, j + 1);
+      auto diff_right = em(i, j) - em(i + 1, j);
+      auto diff_left = em(i, j) - em(i - 1, j);
+      if (std::isnan(diff_up) || std::isnan(diff_down) ||
+        std::isnan(diff_right) || std::isnan(diff_left))
+      {
+        if (std::isnan(em(i, j - 1))) {
+          om(i, j) = 255;
+        } else {
+          om(i, j) = 254;
+        }
+      } else {
+        if (fabs(diff_up) > 1.0 || fabs(diff_down) > 1.0 ||
+          fabs(diff_right) > 1.0 || fabs(diff_left) > 1.0)
+        {
+          om(i, j) = 254;
+        } else {
+          om(i, j) = 1.0;
+        }
+       }
+    }
+  }
+
+  RCLCPP_INFO(get_logger(), "Reverting to gridmap");
+  for (auto i = 0; i < gridmap_->getSize()(0); i++) {
+    for (auto j = 0; j < gridmap_->getSize()(1); j++) {
+      grid_map::Index map_index(i, j);
+      gridmap_->at("elevation", map_index) = em(i, j);
+      gridmap_->at("occupancy", map_index) = om(i, j);
+    }
+  }
+}
+
+void
+GridMapSlamNode::publish_gridmap(
+  const grid_map::GridMap & gridmap)
+{
+  std::unique_ptr<grid_map_msgs::msg::GridMap> msg;
+  msg = grid_map::GridMapRosConverter::toMessage(gridmap);
+  msg->header.frame_id = "map";
+  msg->header.stamp = now();
+
+  gridmap_pub_->publish(std::move(msg));
 }
 
 std::unique_ptr<octomap::OcTree> generate_octomap(
@@ -277,6 +416,8 @@ void remove_points(
 pcl::PointCloud<pcl::PointXYZ>::Ptr
 reduce_density(pcl::PointCloud<pcl::PointXYZ>::Ptr map, double factor)
 {
+  if (factor == 1.0) {return map;}
+
   std::random_device rd;
   std::mt19937 gen(rd());
 

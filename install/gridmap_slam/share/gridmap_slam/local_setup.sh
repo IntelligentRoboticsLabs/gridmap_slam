@@ -1,1 +1,0 @@
-/home/fmrico/ros/ros2/summit_ws/src/gridmap_slam/build/gridmap_slam/ament_cmake_environment_hooks/local_setup.sh

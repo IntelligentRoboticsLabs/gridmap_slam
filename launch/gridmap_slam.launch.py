@@ -28,8 +28,9 @@ def generate_launch_description():
                             executable='gridmap_slam_main',
                             output='screen',
                             parameters=[param_file],
-                            prefix=['xterm -e gdb -ex run  --args'],
+                            # prefix=['xterm -e gdb -ex run  --args'],
                             # prefix=['perf record --call-graph dwarf -o perf.data'],
+                            arguments=['map.pcd'],
                             remappings=[
                               ('input_map', '/map'),
                               ('input_sensor', '/robot/front_laser/points'),

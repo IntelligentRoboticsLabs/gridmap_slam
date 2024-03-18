@@ -15,7 +15,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(octomap REQUIRED)
 find_package(octomap_msgs REQUIRED)
 find_package(octomap_ros REQUIRED)
-find_package(nav2_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -35,7 +35,7 @@ set(dependencies
   octomap
   octomap_msgs
   octomap_ros
-  nav2_msgs
+  nav_msgs
   sensor_msgs
   std_msgs
   tf2_geometry_msgs

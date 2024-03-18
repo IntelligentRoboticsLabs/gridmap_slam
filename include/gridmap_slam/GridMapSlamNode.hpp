@@ -16,6 +16,8 @@
 #ifndef GRIDMAP_SLAM__GRID_MAP_SLAM_NODE__HPP_
 #define GRIDMAP_SLAM__GRID_MAP_SLAM_NODE__HPP_
 
+#include <list>
+
 #include "tf2_ros/transform_listener.h"
 #include "octomap/octomap.h"
 #include "octomap/Pointcloud.h"
@@ -29,6 +31,7 @@
 #include "octomap_msgs/msg/octomap.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "std_srvs/srv/empty.hpp"
+#include "nav_msgs/msg/path.hpp"
 
 #include "interactive_markers/interactive_marker_server.hpp"
 
@@ -51,23 +54,48 @@ public:
     const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
 
 private:
+  void publish_cycle();
+
   void map_pc_callback(sensor_msgs::msg::PointCloud2::UniquePtr pc_in);
+  void path_callback(nav_msgs::msg::Path::UniquePtr path_in);
+
   void publish_map(const pcl::PointCloud<pcl::PointXYZ> & pc_map);
   void publish_octomap(const octomap::OcTree & octomap);
+  void publish_gridmap(const grid_map::GridMap & gridmap);
+
   void marker_feedback(visualization_msgs::msg::InteractiveMarkerFeedback::ConstSharedPtr feedback);
+
   void save_map_callback(const std::shared_ptr<std_srvs::srv::Empty::Request> request,
     std::shared_ptr<std_srvs::srv::Empty::Response> response);
-      
+  void update_gridmap_callback(const std::shared_ptr<std_srvs::srv::Empty::Request> request,
+    std::shared_ptr<std_srvs::srv::Empty::Response> response);
+
+  void update_gridmap();
+
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pc_pub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_pc_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr path_sub_;
   rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr octomap_pub_;
-  
+  rclcpp::Publisher<grid_map_msgs::msg::GridMap>::SharedPtr gridmap_pub_;
+
   rclcpp::Service<std_srvs::srv::Empty>::SharedPtr save_srv_;
+  rclcpp::Service<std_srvs::srv::Empty>::SharedPtr update_gridmap_srv_;
+
+  rclcpp::TimerBase::SharedPtr publish_timer_;
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr map_pc_;
+  std::unique_ptr<octomap::OcTree> octree_;
+  std::unique_ptr<grid_map::GridMap> gridmap_;
+
   std::shared_ptr<interactive_markers::InteractiveMarkerServer> im_server_;
   double resolution_ {0.5};
+  std::string map_frame_ {"map"};
+  std::string robot_floor_frame_ {"base_footprint"};
 
+  nav_msgs::msg::Path::UniquePtr path_;
+
+  tf2_ros::Buffer tf_buffer_;
+  tf2_ros::TransformListener tf_listener_;
 
   /*
 
