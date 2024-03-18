@@ -24,6 +24,8 @@
 #include "pcl_conversions/pcl_conversions.h"
 #include "tf2_ros/transform_listener.h"
 #include "tf2_ros/buffer.h"
+#include "pcl/io/pcd_io.h"
+#include "pcl/point_types.h"
 
 #include "pcl_ros/transforms.hpp"
 #include "grid_map_ros/grid_map_ros.hpp"
@@ -31,6 +33,7 @@
 #include "octomap_msgs/msg/octomap.hpp"
 #include "octomap_ros/conversions.hpp"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+#include "visualization_msgs/msg/interactive_marker.hpp"
 
 #include "sensor_msgs/msg/point_cloud2.hpp"
 
@@ -44,35 +47,187 @@ namespace gridmap_slam
 using std::placeholders::_1;
 using namespace std::chrono_literals;
 
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr read_pcd(const std::string & pcd_file, double resolution);
+std::unique_ptr<octomap::OcTree> generate_octomap(
+  const pcl::PointCloud<pcl::PointXYZ> & pc_map, double resolution);
+visualization_msgs::msg::InteractiveMarker create_marker(double size);
+
 GridMapSlamNode::GridMapSlamNode(
   const std::string & node_name,
+  const std::string & pcd_file,
   const rclcpp::NodeOptions & options)
-: Node(node_name, options),
-  tf_buffer_(this->get_clock()),
-  tf_listener_(tf_buffer_)
+: Node(node_name, options)
 {
   declare_parameter("resolution", resolution_);
   get_parameter("resolution", resolution_);
-  declare_parameter("cleaning_time", cleaning_time_);
-  get_parameter("cleaning_time", cleaning_time_);
-  declare_parameter("map_frame", map_frame_);
-  get_parameter("map_frame", map_frame_);
 
   map_pc_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-    "input_map", 10, std::bind(&GridMapSlamNode::map_pc_callback, this, _1));
-  sensor_pc_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-    "input_sensor", 1, std::bind(&GridMapSlamNode::sensor_pc_callback, this, _1));
-
-  gridmap_pub_ = create_publisher<grid_map_msgs::msg::GridMap>("grid_map", 10);
+    "map", 10, std::bind(&GridMapSlamNode::map_pc_callback, this, _1));
   octomap_pub_ = create_publisher<octomap_msgs::msg::Octomap>("octomap", 10);
-  clean_octomap_pub_ = create_publisher<octomap_msgs::msg::Octomap>("clean_octomap", 10);
+  map_pc_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("map", 10);
 
-  sensor_pc_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("debug_pc", 10);
-  marker_pub_  = create_publisher<visualization_msgs::msg::MarkerArray>("debug_marker", 10);
+  map_pc_ = read_pcd(pcd_file, resolution_);
+  publish_map(*map_pc_);
 
-  last_cleanning_ts_ = now() - rclcpp::Duration::from_seconds(cleaning_time_);
+  publish_octomap(*generate_octomap(*map_pc_, resolution_));
+
+  im_server_ = std::make_shared<interactive_markers::InteractiveMarkerServer>("simple_marker", this);
+  auto marker = create_marker(resolution_);
+  marker.header.stamp = now();
+
+  im_server_->insert(marker, std::bind(&GridMapSlamNode::marker_feedback, this, _1));
+  im_server_->applyChanges();
+
+  // gridmap_pub_ = create_publisher<grid_map_msgs::msg::GridMap>("grid_map", 10);
+  // octomap_pub_ = create_publisher<octomap_msgs::msg::Octomap>("octomap", 10);
+//  clean_octomap_pub_ = create_publisher<octomap_msgs::msg::Octomap>("clean_octomap", 10);
+//
+//  sensor_pc_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("debug_pc", 10);
+//  marker_pub_  = create_publisher<visualization_msgs::msg::MarkerArray>("debug_marker", 10);
+//
+//  last_cleanning_ts_ = now() - rclcpp::Duration::from_seconds(cleaning_time_);
 }
 
+void
+GridMapSlamNode::map_pc_callback(sensor_msgs::msg::PointCloud2::UniquePtr pc_in)
+{
+  pcl::PointCloud<pcl::PointXYZ>::Ptr map_pc_(new pcl::PointCloud<pcl::PointXYZ>);
+  pcl::fromROSMsg(*pc_in, *map_pc_);
+}
+
+void
+GridMapSlamNode::publish_map(const pcl::PointCloud<pcl::PointXYZ> & pc_map)
+{
+  sensor_msgs::msg::PointCloud2 pub_pc;
+  pcl::toROSMsg(pc_map, pub_pc);
+  pub_pc.header.frame_id = "map";
+  pub_pc.header.stamp = now();
+  map_pc_pub_->publish(pub_pc);
+}
+
+void
+GridMapSlamNode::publish_octomap(const octomap::OcTree & octomap)
+{
+  octomap_msgs::msg::Octomap octomap_msg;
+  octomap_msgs::binaryMapToMsg(octomap, octomap_msg);
+  
+  octomap_msg.header.frame_id = "map";
+  octomap_msg.header.stamp = now();
+
+  octomap_pub_->publish(octomap_msg);
+}
+
+void
+GridMapSlamNode::marker_feedback(visualization_msgs::msg::InteractiveMarkerFeedback::ConstSharedPtr feedback)
+{
+  RCLCPP_INFO_STREAM(
+    get_logger(), feedback->marker_name << " is now at "
+      << feedback->pose.position.x << ", " << feedback->pose.position.y
+      << ", " << feedback->pose.position.z );
+
+
+  if (feedback->event_type == visualization_msgs::msg::InteractiveMarkerFeedback::MOUSE_DOWN &&
+    feedback->control_name == "click") {
+    RCLCPP_INFO_STREAM(get_logger(), "Click");
+  }
+}
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr
+read_pcd(const std::string & pcd_file, double resolution)
+{
+  auto cloud = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+  if (pcl::io::loadPCDFile<pcl::PointXYZ>(pcd_file, *cloud) == -1) {
+    PCL_ERROR("Couldn't read file your_file.pcd \n");
+    return nullptr;
+  } else {
+    auto ret = std::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+    pcl::VoxelGrid<pcl::PointXYZ> voxel_grid_filter;
+    voxel_grid_filter.setInputCloud(cloud);
+    voxel_grid_filter.setLeafSize(resolution, resolution, resolution);
+    voxel_grid_filter.filter(*ret);
+    
+    return ret;
+  }
+}
+
+std::unique_ptr<octomap::OcTree> generate_octomap(
+  const pcl::PointCloud<pcl::PointXYZ> & pc_map, double resolution)
+{
+  octomap::Pointcloud octo_cloud;
+  for (const auto & point : pc_map.points) {
+    octo_cloud.push_back(point.x, point.y, point.z);
+  }
+
+  auto octomap = std::make_unique<octomap::OcTree>(resolution);
+  octomap->insertPointCloud(octo_cloud, octomap::point3d(0, 0, 0));
+
+  return octomap;
+}
+
+visualization_msgs::msg::InteractiveMarker create_marker(double size)
+{
+  visualization_msgs::msg::InteractiveMarker int_marker;
+  int_marker.header.frame_id = "map";
+  int_marker.name = "my_marker";
+  int_marker.description = "Simple 1-DOF Control";
+
+  visualization_msgs::msg::Marker box_marker;
+  box_marker.type = visualization_msgs::msg::Marker::CUBE;
+  box_marker.scale.x = size;
+  box_marker.scale.y = size;
+  box_marker.scale.z = size;
+  box_marker.color.r = 1.0;
+  box_marker.color.g = 0.0;
+  box_marker.color.b = 0.0;
+  box_marker.color.a = 1.0;
+
+  visualization_msgs::msg::InteractiveMarkerControl box_control;
+  box_control.always_visible = true;
+  box_control.name = "click";
+  box_control.interaction_mode = visualization_msgs::msg::InteractiveMarkerControl::BUTTON;
+
+  box_control.markers.push_back( box_marker );
+  int_marker.controls.push_back( box_control );
+
+  visualization_msgs::msg::InteractiveMarkerControl move_x_control;
+  move_x_control.orientation.w = 1;
+  move_x_control.orientation.x = 1;
+  move_x_control.orientation.y = 0;
+  move_x_control.orientation.z = 0;
+
+  visualization_msgs::msg::InteractiveMarkerControl move_y_control;
+  move_y_control.orientation.w = 1;
+  move_y_control.orientation.x = 0;
+  move_y_control.orientation.y = 0;
+  move_y_control.orientation.z = 1;
+
+  visualization_msgs::msg::InteractiveMarkerControl move_z_control;
+  move_z_control.orientation.w = 1;
+  move_z_control.orientation.x = 0;
+  move_z_control.orientation.y = 1;
+  move_z_control.orientation.z = 0;
+
+  visualization_msgs::msg::InteractiveMarkerControl click_control;
+
+  move_x_control.name = "move_x";
+  move_y_control.name = "move_y";
+  move_z_control.name = "move_z";
+
+  move_x_control.interaction_mode = visualization_msgs::msg::InteractiveMarkerControl::MOVE_AXIS;
+  move_y_control.interaction_mode = visualization_msgs::msg::InteractiveMarkerControl::MOVE_AXIS;
+  move_z_control.interaction_mode = visualization_msgs::msg::InteractiveMarkerControl::MOVE_AXIS;
+  
+
+  int_marker.controls.push_back(move_x_control);
+  int_marker.controls.push_back(move_y_control);
+  int_marker.controls.push_back(move_z_control);
+
+  return int_marker;
+}
+
+
+/*
 pcl::PointCloud<pcl::PointXYZ>::Ptr
 get_reduced_pc(const sensor_msgs::msg::PointCloud2 & pc, double resolution)
 {
@@ -360,5 +515,5 @@ GridMapSlamNode::publish_octomap(
 
   pub.publish(octomap_msg);
 }
-
+*/
 }  //  namespace gridmap_slam

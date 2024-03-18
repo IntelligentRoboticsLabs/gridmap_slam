@@ -29,6 +29,8 @@
 #include "octomap_msgs/msg/octomap.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 
+#include "interactive_markers/interactive_marker_server.hpp"
+
 #include "sensor_msgs/msg/point_cloud2.hpp"
 
 #include "rclcpp/rclcpp.hpp"
@@ -44,10 +46,26 @@ public:
 
   GridMapSlamNode(
     const std::string & node_name,
+    const std::string & pcd_file,
     const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
 
 private:
   void map_pc_callback(sensor_msgs::msg::PointCloud2::UniquePtr pc_in);
+  void publish_map(const pcl::PointCloud<pcl::PointXYZ> & pc_map);
+  void publish_octomap(const octomap::OcTree & octomap);
+  void marker_feedback(visualization_msgs::msg::InteractiveMarkerFeedback::ConstSharedPtr feedback);
+
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pc_pub_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr map_pc_sub_;
+  rclcpp::Publisher<octomap_msgs::msg::Octomap>::SharedPtr octomap_pub_;
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr map_pc_;
+  std::shared_ptr<interactive_markers::InteractiveMarkerServer> im_server_;
+  double resolution_ {0.5};
+
+
+  /*
+
   void sensor_pc_callback(sensor_msgs::msg::PointCloud2::UniquePtr pc_in);
 
   std::unique_ptr<grid_map::GridMap> update_gridmap(const pcl::PointCloud<pcl::PointXYZ> & pc);
@@ -79,7 +97,7 @@ private:
   double resolution_ {0.5};
   double cleaning_time_ {2.0};
   rclcpp::Time last_cleanning_ts_;
-  std::string map_frame_ {"map"};
+  std::string map_frame_ {"map"};*/
 };
 
 }  //  namespace gridmap_slam

@@ -22,7 +22,12 @@ int main(int argc, char * argv[])
 {
   rclcpp::init(argc, argv);
 
-  auto gridmap_slam_node = gridmap_slam::GridMapSlamNode::make_shared("gridmap_slam");
+  if (argc < 2) {
+    std::cerr << "Usage: ros2 run gridmap_slam gridmap_slam_main <map_file.pcd>" << std::endl;
+  }
+
+  std::cout << "Using file [" <<  argv[1] << "]" << std::endl;
+  auto gridmap_slam_node = gridmap_slam::GridMapSlamNode::make_shared("gridmap_slam", argv[1]);
 
   rclcpp::spin(gridmap_slam_node);
 
